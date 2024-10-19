@@ -1,0 +1,6 @@
+# .clang-format
+IndentWidth: 4
+IndentPPDirectives: AfterHash
+AlignConsecutiveDeclarations: true
+PointerAlignment: Left
+ColumnLimit: 110
