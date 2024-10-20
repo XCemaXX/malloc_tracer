@@ -6,6 +6,7 @@
 #include <string>
 #include <unistd.h>
 #include <vector>
+#include <memory>
 
 bool run = true;
 
@@ -35,6 +36,16 @@ struct my_struct23 {
 // template<int s> struct Wow;
 // Wow<sizeof(my_struct23)> wow;
 
+std::vector<std::unique_ptr<std::vector<int>>> make_vectors(int n) {
+    std::vector<std::unique_ptr<std::vector<int>>> res;
+    res.reserve(n);
+    for (int i = 0; i < n; ++i) {
+        auto ptr = std::make_unique<std::vector<int>>(std::vector<int>{i, i});
+        res.push_back(std::move(ptr));
+    }
+    return res;
+}
+
 int main(int, char**) {
     auto a = new my_struct120();
     auto b = new my_struct40();
@@ -55,6 +66,7 @@ int main(int, char**) {
     sprintf(big100Mb, "big100Mb. A lot of data");
     sprintf(big10Mb, "big10Mb. A lot of data");
 
+    auto vectors = make_vectors(30);
     while (run) {
         ++i;
         std::cout << "Pid " << ::getpid() << " " << (int)i;
