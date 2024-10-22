@@ -12,19 +12,19 @@ import gdb
 
 
 @lru_cache
-def lookup_type(typename):
+def lookup_type_ptr(typename):
     try:
-        gdbtype = gdb.lookup_type(typename).strip_typedefs()
+        gdbtype = gdb.lookup_type(typename).strip_typedefs().pointer()
     except RuntimeError:
         gdbtype = None
     if gdbtype:
         return gdbtype
     raise RuntimeError(f'Could not find type "{typename}"')
 
-
-type_void_ptr = lookup_type("void").pointer()
-sizeof_ptr = type_void_ptr.sizeof
-if sizeof_ptr == 4:
+TYPE_UNSIGNED_CHAR_PTR = lookup_type_ptr("unsigned char")
+TYPE_UINT64T_PTR = lookup_type_ptr("uint64_t")
+TYPE_VOID_PTR = lookup_type_ptr("void")
+if TYPE_VOID_PTR.sizeof == 4:
     def fmt_addr(addr):
         return f"0x{addr:08x}"
 else:
@@ -37,7 +37,7 @@ def as_hexdump_char(b):
 
 
 def hexdump_as_bytes(addr, size, chars_only=True):
-    addr = gdb.Value(addr).cast(lookup_type("unsigned char").pointer())
+    addr = gdb.Value(addr).cast(TYPE_UNSIGNED_CHAR_PTR)
     bytes = []
     for j in range(size):
         ptr = addr + j
@@ -53,9 +53,12 @@ def hexdump_as_bytes(addr, size, chars_only=True):
 
 
 def hexdump_as_uint64_t(addr):
-    addr = gdb.Value(addr).cast(lookup_type("uint64_t").pointer())
+    addr = gdb.Value(addr).cast(TYPE_UINT64T_PTR)
     return int(addr.dereference())
 
+def hexdump_as_two_uint64s(addr):
+    addr = gdb.Value(addr).cast(TYPE_UINT64T_PTR)
+    return int(addr.dereference()), int((addr+1).dereference())
 
 # gdb.execute's to_string keyword argument was added between F13 and F14.
 # See https://bugzilla.redhat.com/show_bug.cgi?id=610241
@@ -121,6 +124,7 @@ class AddressResolver:
         else:
             return ("Unknown lib", "Unknown function", 0)
 
+    
     @lru_cache
     def get_info_symbol(self, address):
         info_str = execute(f"info symbol {address}")
@@ -185,13 +189,11 @@ class MemorySizes:
     chunksize: int = 0
     count: int = 0
 
-    def __add__(self, other):
-        return MemorySizes(
-            self.user_size + other.user_size,
-            self.memsize + other.memsize,
-            self.chunksize + other.chunksize,
-            self.count + other.count,
-        )
+    def add(self, other):
+        self.user_size += other.user_size
+        self.memsize += other.memsize
+        self.chunksize += other.chunksize
+        self.count += other.count
 
     def __repr__(self):
         return (
@@ -218,7 +220,7 @@ class RetAddr:
     def append(self, offset, memory_record: MemoryRecord):
         self.offset = offset
         self.data_addrs.append(memory_record.start_of_data)
-        self.total_sizes += memory_record.sizes
+        self.total_sizes.add(memory_record.sizes)
         return memory_record.sizes
 
     def __repr__(self):
@@ -237,7 +239,7 @@ class Func:
 
     def append(self, return_addr, *args):
         sizes = self.return_addrs[return_addr].append(*args)
-        self.total_sizes += sizes
+        self.total_sizes.add(sizes)
         return sizes
 
     def __repr__(self):
@@ -251,7 +253,7 @@ class Lib:
 
     def append(self, func_name, *args):
         sizes = self.funcs[func_name].append(*args)
-        self.total_sizes += sizes
+        self.total_sizes.add(sizes)
         return sizes
 
     def __repr__(self):
@@ -274,12 +276,12 @@ class Allocations:
             counter += 1
             if counter % 100000 == 0:
                 print(f"Analyzed {counter} records")
-            return_addr, size_user = self.__parse_hook_malloc_header(chunk_addr, size_malloc)
+            return_addr, size_user = self.__parse_hook_malloc_footer(chunk_addr, size_malloc)
             if size_user < 0 or size_user >= size_malloc:
                 self.__add_error(size_malloc)
                 continue
             lib, func_name, func_offset = address_resolver.get_info_symbol(return_addr)
-            self.total_sizes += self.libs[lib].append(
+            self.total_sizes.add(self.libs[lib].append(
                 func_name,
                 return_addr,
                 func_offset,
@@ -289,7 +291,7 @@ class Allocations:
                         user_size=size_user, memsize=size_malloc - (2 * 8), chunksize=size_malloc, count=1
                     ),
                 ),
-            )
+            ))
 
         self.libs = OrderedDict(
             sorted(self.libs.items(), key=lambda kv: kv[1].total_sizes.user_size, reverse=True)
@@ -309,9 +311,9 @@ class Allocations:
         self.errors_count += 1
         self.errors_malloc_total += size_malloc
 
-    def __iter_chap_file(self, pattern_str=r"Used allocation at ([0-9a-f]+) of size ([0-9a-f]+)"):
+    def __iter_chap_file(self, pattern_str=r"^Used allocation at ([0-9a-f]+) of size ([0-9a-f]+)"):
         pattern = re.compile(pattern_str, flags=0)
-        with open(self.chap) as chap_file:
+        with open(self.chap, 'r') as chap_file:
             for line in chap_file:
                 m = pattern.match(line)
                 if m:
@@ -319,14 +321,11 @@ class Allocations:
                     yield (start, size)
 
     @staticmethod
-    def __parse_hook_malloc_header(addr, size_malloc):
+    def __parse_hook_malloc_footer(addr, size_malloc):
         try:
             addr = addr + size_malloc - 16
-            return_addr = hexdump_as_uint64_t(addr)
-            user_size = hexdump_as_uint64_t(addr + 8)
-            size = 32
-            addr += size
-            return (return_addr, user_size)
+            return_addr, user_size = hexdump_as_two_uint64s(addr)
+            return return_addr, user_size
         except Exception:
             return (0, -1)
 
@@ -336,7 +335,7 @@ class Allocations:
         total_size = 0
         by_sizes = defaultdict(list)
         for chunk_addr, size_malloc in self.__iter_chap_file(
-            r"Free allocation at ([0-9a-f]+) of size ([0-9a-f]+)"
+            r"^Free allocation at ([0-9a-f]+) of size ([0-9a-f]+)"
         ):
             counter += 1
             total_size += size_malloc
@@ -396,7 +395,7 @@ class Allocations:
 # TODO: profile. Maybe several threads in resolving addresses __fill_libs_allocations
 # TODO: add annotations to arguments
 # TODO: update readme
-
+# TODO: get info about single allocation by addr
 
 class SetChapFileName(gdb.Command):
     def __init__(self):
