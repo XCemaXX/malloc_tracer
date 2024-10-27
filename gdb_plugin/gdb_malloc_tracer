@@ -7,12 +7,13 @@ from collections import OrderedDict, defaultdict, namedtuple
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
+from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 import gdb
 
 
 @lru_cache
-def lookup_type_ptr(typename):
+def lookup_type_ptr(typename: str) -> Optional[gdb.Type]:
     try:
         gdbtype = gdb.lookup_type(typename).strip_typedefs().pointer()
     except RuntimeError:
@@ -21,22 +22,25 @@ def lookup_type_ptr(typename):
         return gdbtype
     raise RuntimeError(f'Could not find type "{typename}"')
 
+
 TYPE_UNSIGNED_CHAR_PTR = lookup_type_ptr("unsigned char")
 TYPE_UINT64T_PTR = lookup_type_ptr("uint64_t")
 TYPE_VOID_PTR = lookup_type_ptr("void")
 if TYPE_VOID_PTR.sizeof == 4:
-    def fmt_addr(addr):
+
+    def fmt_addr(addr: int) -> str:
         return f"0x{addr:08x}"
 else:
-    def fmt_addr(addr):
+
+    def fmt_addr(addr: int) -> str:
         return f"0x{addr:016x}"
 
 
-def as_hexdump_char(b):
+def as_hexdump_char(b: int) -> str:
     return chr(b) if b >= 0x20 and b < 0x80 else "."
 
 
-def hexdump_as_bytes(addr, size, chars_only=True):
+def hexdump_as_bytes(addr: int, size: int, chars_only: bool = True) -> str:
     addr = gdb.Value(addr).cast(TYPE_UNSIGNED_CHAR_PTR)
     bytes = []
     for j in range(size):
@@ -52,13 +56,15 @@ def hexdump_as_bytes(addr, size, chars_only=True):
     return result
 
 
-def hexdump_as_uint64_t(addr):
+def hexdump_as_uint64_t(addr: int) -> int:
     addr = gdb.Value(addr).cast(TYPE_UINT64T_PTR)
     return int(addr.dereference())
 
-def hexdump_as_two_uint64s(addr):
+
+def hexdump_as_two_uint64s(addr: int) -> Tuple[int, int]:
     addr = gdb.Value(addr).cast(TYPE_UINT64T_PTR)
-    return int(addr.dereference()), int((addr+1).dereference())
+    return int(addr.dereference()), int((addr + 1).dereference())
+
 
 # gdb.execute's to_string keyword argument was added between F13 and F14.
 # See https://bugzilla.redhat.com/show_bug.cgi?id=610241
@@ -71,15 +77,15 @@ except TypeError:
     has_gdb_execute_to_string = False
 
 if has_gdb_execute_to_string:
-    def execute(command):
-        """Equivalent to gdb.execute(to_string=True), returning the output as
-        a string rather than logging it to stdout.
 
-        On gdb versions lacking this capability, it uses redirection and temporary
-        files to achieve the same result"""
+    def execute(command: str) -> str:
+        """Executes a GDB command and returns the output as a string.
+        This is equivalent to gdb.execute(to_string=True). If GDB version lacks this feature,
+        redirects output via temporary files to capture results."""
         return gdb.execute(command, to_string=True)
 else:
-    def execute(command):
+
+    def execute(command: str) -> str:
         import tempfile
 
         f = tempfile.NamedTemporaryFile("r", delete=True)
@@ -96,14 +102,23 @@ else:
         return result
 
 
-#######################################
+def convert_size(size_bytes: int) -> str:
+    if size_bytes == 0:
+        return "0B"
+    size_name = ("B", "KB", "MB", "GB", "TB", "PB", "EB", "ZB", "YB")
+    i = int(math.floor(math.log(size_bytes, 1024)))
+    p = math.pow(1024, i)
+    s = round(size_bytes / p, 2)
+    return f"{s}{size_name[i]}"
+
+
 class AddressResolver:
     MappingRecord = namedtuple("MappingRecord", ["start", "end", "size", "offset", "objfile"])
 
     def __init__(self):
         self.memory_mappings = self.__get_process_memory_mapping()
 
-    def __find_region(self, address):
+    def __find_region(self, address: int) -> Tuple[str, str, int]:
         index = bisect_left(self.memory_mappings, address, key=lambda x: x.end)
         if index == len(self.memory_mappings):
             return ("Unknown lib", "Unknown function", 0)
@@ -124,9 +139,8 @@ class AddressResolver:
         else:
             return ("Unknown lib", "Unknown function", 0)
 
-    
     @lru_cache
-    def get_info_symbol(self, address):
+    def get_info_symbol(self, address: int) -> Tuple[str, str, int]:
         info_str = execute(f"info symbol {address}")
 
         if info_str.startswith("No symbol matches"):
@@ -149,7 +163,7 @@ class AddressResolver:
         return (lib, func_name, func_offset)
 
     @classmethod
-    def __get_process_memory_mapping(cls):
+    def __get_process_memory_mapping(cls) -> List[MappingRecord]:
         mappings = list()
         lines = execute("info proc mappings").splitlines()
         for line in lines:
@@ -172,30 +186,20 @@ class AddressResolver:
         return mappings
 
 
-def convert_size(size_bytes):
-    if size_bytes == 0:
-        return "0B"
-    size_name = ("B", "KB", "MB", "GB", "TB", "PB", "EB", "ZB", "YB")
-    i = int(math.floor(math.log(size_bytes, 1024)))
-    p = math.pow(1024, i)
-    s = round(size_bytes / p, 2)
-    return f"{s}{size_name[i]}"
-
-
-@dataclass(slots=True)  # TODO: add explanations to sizes
+@dataclass(slots=True)
 class MemorySizes:
     user_size: int = 0
     memsize: int = 0
     chunksize: int = 0
     count: int = 0
 
-    def add(self, other):
+    def add(self, other: "MemorySizes") -> None:
         self.user_size += other.user_size
         self.memsize += other.memsize
         self.chunksize += other.chunksize
         self.count += other.count
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return (
             f"Sizes: User={convert_size(self.user_size)}, Mem={convert_size(self.memsize)}, "
             f"Chunk={convert_size(self.chunksize)}; Count={self.count}; "
@@ -217,18 +221,18 @@ class RetAddr:
     data_addrs: array = field(default_factory=lambda: array("L"))
     total_sizes: MemorySizes = field(default_factory=MemorySizes)
 
-    def append(self, offset, memory_record: MemoryRecord):
+    def append(self, offset: int, memory_record: MemoryRecord) -> MemorySizes:
         self.offset = offset
         self.data_addrs.append(memory_record.start_of_data)
         self.total_sizes.add(memory_record.sizes)
         return memory_record.sizes
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return f"{self.offset}, {self.total_sizes}"
 
-    def repr_memory_records(self):
+    def repr_memory_records(self) -> str:
         lines = ", ".join(f"{hex(addr)}" for addr in self.data_addrs)
-        return f" Data addrs: {lines}"
+        return f" Data addresses: {lines}"
 
 
 @dataclass(slots=True)
@@ -237,12 +241,12 @@ class Func:
     return_addrs: defaultdict = field(default_factory=lambda: defaultdict(RetAddr))
     total_sizes: MemorySizes = field(default_factory=MemorySizes)
 
-    def append(self, return_addr, *args):
+    def append(self, return_addr: int, *args: Any) -> MemorySizes:
         sizes = self.return_addrs[return_addr].append(*args)
         self.total_sizes.add(sizes)
         return sizes
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return str(self.total_sizes)
 
 
@@ -251,17 +255,17 @@ class Lib:
     funcs: defaultdict = field(default_factory=lambda: defaultdict(Func))
     total_sizes: MemorySizes = field(default_factory=MemorySizes)
 
-    def append(self, func_name, *args):
+    def append(self, func_name: str, *args: Any) -> MemorySizes:
         sizes = self.funcs[func_name].append(*args)
         self.total_sizes.add(sizes)
         return sizes
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return str(self.total_sizes)
 
 
 class Allocations:
-    def __init__(self, chap):
+    def __init__(self, chap: str):
         self.total_sizes = MemorySizes()
         self.libs = defaultdict(Lib)
         self.errors_count = 0
@@ -269,7 +273,7 @@ class Allocations:
         self.chap = chap
 
     @lru_cache
-    def __fill_libs_allocations(self):
+    def __fill_libs_allocations(self) -> None:
         counter = 0
         address_resolver = AddressResolver()
         for chunk_addr, size_malloc in self.__iter_chap_file():
@@ -281,17 +285,19 @@ class Allocations:
                 self.__add_error(size_malloc)
                 continue
             lib, func_name, func_offset = address_resolver.get_info_symbol(return_addr)
-            self.total_sizes.add(self.libs[lib].append(
-                func_name,
-                return_addr,
-                func_offset,
-                MemoryRecord(
-                    start_of_data=chunk_addr,
-                    sizes=MemorySizes(
-                        user_size=size_user, memsize=size_malloc - (2 * 8), chunksize=size_malloc, count=1
+            self.total_sizes.add(
+                self.libs[lib].append(
+                    func_name,
+                    return_addr,
+                    func_offset,
+                    MemoryRecord(
+                        start_of_data=chunk_addr,
+                        sizes=MemorySizes(
+                            user_size=size_user, memsize=size_malloc - (2 * 8), chunksize=size_malloc, count=1
+                        ),
                     ),
-                ),
-            ))
+                )
+            )
 
         self.libs = OrderedDict(
             sorted(self.libs.items(), key=lambda kv: kv[1].total_sizes.user_size, reverse=True)
@@ -307,13 +313,15 @@ class Allocations:
                     )
                 )
 
-    def __add_error(self, size_malloc):
+    def __add_error(self, size_malloc) -> None:
         self.errors_count += 1
         self.errors_malloc_total += size_malloc
 
-    def __iter_chap_file(self, pattern_str=r"^Used allocation at ([0-9a-f]+) of size ([0-9a-f]+)"):
+    def __iter_chap_file(
+        self, pattern_str: str = r"^Used allocation at ([0-9a-f]+) of size ([0-9a-f]+)"
+    ) -> Iterator[Tuple[int, int]]:
         pattern = re.compile(pattern_str, flags=0)
-        with open(self.chap, 'r') as chap_file:
+        with open(self.chap, "r") as chap_file:
             for line in chap_file:
                 m = pattern.match(line)
                 if m:
@@ -321,7 +329,7 @@ class Allocations:
                     yield (start, size)
 
     @staticmethod
-    def __parse_hook_malloc_footer(addr, size_malloc):
+    def __parse_hook_malloc_footer(addr: int, size_malloc: int) -> Tuple[int, int]:
         try:
             addr = addr + size_malloc - 16
             return_addr, user_size = hexdump_as_two_uint64s(addr)
@@ -330,7 +338,7 @@ class Allocations:
             return (0, -1)
 
     @lru_cache
-    def __get_free(self):
+    def __get_free(self) -> Tuple[int, int, Dict[int, List[int]]]:
         counter = 0
         total_size = 0
         by_sizes = defaultdict(list)
@@ -343,20 +351,20 @@ class Allocations:
         by_sizes = OrderedDict(sorted(by_sizes.items(), key=lambda kv: kv[0] * len(kv[1]), reverse=True))
         return counter, total_size, by_sizes
 
-    def print_libs(self):
+    def print_libs(self) -> None:
         self.__fill_libs_allocations()
-        print(f"###Info for all. Total {self.total_sizes}")
+        print(f"### Total memory allocations {self.total_sizes}")
         print(*(f'Lib: "{k}": {v}' for k, v in self.libs.items()), sep="\n")
 
-    def print_lib(self, lib_name):
+    def print_lib(self, lib_name: str) -> None:
         self.__fill_libs_allocations()
         if lib_name not in self.libs:
             print(f'There is no such lib: "{lib_name}"')
             return
-        print(f'###Info for lib "{lib_name}". Total {self.libs[lib_name]}')
+        print(f'### Memory allocations for library "{lib_name}". Total {self.libs[lib_name]}')
         print(*(f'Func: "{k}": {v}' for k, v in self.libs[lib_name].funcs.items()), sep="\n")
 
-    def print_func(self, lib_name, func_name, show_alloc_addreses=False):
+    def print_func(self, lib_name: str, func_name: str, show_alloc_addreses: bool = False) -> None:
         self.__fill_libs_allocations()
         if lib_name not in self.libs:
             print(f'There is no such lib: "{lib_name}"')
@@ -365,15 +373,17 @@ class Allocations:
         if func_name not in funcs_info:
             print(f'There is no such func "{func_name}" in lib "{lib_name}"')
             return
-        print(f'###Info for func "{func_name}" in lib "{lib_name}". Total {funcs_info[func_name]}')
+        print(
+            f'###  Memory allocations for function "{func_name}" in library "{lib_name}": {funcs_info[func_name]}'
+        )
         for k, v in funcs_info[func_name].return_addrs.items():
             print(f"RetAddr: 0x{k:02x}, FuncOffset+{v}")
             if show_alloc_addreses:
                 print(v.repr_memory_records())
 
-    def print_free(self, mode=None):
+    def print_free(self, mode: Optional[str] = None) -> None:
         counter, total_size, addrs_by_size = self.__get_free()
-        print(f" Total size: {convert_size(total_size)}. Allocs count: {counter:_}")
+        print(f" Total size of free allocations: {convert_size(total_size)} (count: {counter:_})")
         counter = 0
         if mode == "count":
             for size, addrs in addrs_by_size.items():
@@ -384,47 +394,70 @@ class Allocations:
         elif mode == "detailed":
             for size, addrs in addrs_by_size.items():
                 counter += 1
-                addrs_str = str([f"0x{i:02x}" for i in addrs])  # TODO: make join
+                addrs_str = ", ".join(f"0x{addr:02x}" for addr in addrs)
                 print(f"{counter}# Size: {convert_size(size)}\n Addresses: {addrs_str}")
         elif mode is not None:
             raise ValueError("Not supported mode")
 
 
-# TODO: add helps. Add description of heap_total q q q q = errors
-# TODO: better naming commands
-# TODO: profile. Maybe several threads in resolving addresses __fill_libs_allocations
-# TODO: add annotations to arguments
 # TODO: update readme
 # TODO: get info about single allocation by addr
 
-class SetChapFileName(gdb.Command):
-    def __init__(self):
-        gdb.Command.__init__(self, "set_chap", gdb.COMMAND_DATA)
+
+def set_chap_file(filename: Path) -> bool:
+    global ALLOCATIONS
+    if not filename.exists():
+        print(f"There is no file: {filename}")
+        return False
+    else:
+        ALLOCATIONS = Allocations(filename)
+        return True
+
+
+class GdbCommandData(gdb.Command):
+    def __init__(self, cmd):
+        gdb.Command.__init__(self, cmd, gdb.COMMAND_DATA)
+        self.cmd_name = cmd
+
+
+class SetChapFileName(GdbCommandData):
+    def __print_help(self):
+        print(
+            f"Usage: {self.cmd_name} FILENAME",
+            "Sets the source file containing allocation data for analysis.",
+            sep="\n",
+        )
 
     def invoke(self, args, from_tty):
-        global ALLOCATIONS
         arg_list = gdb.string_to_argv(args)
+        if len(arg_list) == 1 and arg_list[0] == "-h":
+            return self.__print_help()
         if len(arg_list) == 1:
-            filename = Path(arg_list[0])
-            if not filename.exists():
-                print(f"There is no file: {filename}")
-            else:
-                ALLOCATIONS = Allocations(filename)
+            set_chap_file(Path(arg_list[0]))
         else:
-            print("Usage: set_chap FILENAME")
+            return self.__print_help()
 
 
-class HeapDetailedTotal(gdb.Command):
-    def __init__(self):
-        gdb.Command.__init__(self, "heap_total", gdb.COMMAND_DATA)
+class HeapTotal(GdbCommandData):
+    def __print_help(self):
+        print(
+            f"Usage: {self.cmd_name} [LIB_NAME [FUNC_NAME]]",
+            "Displays memory allocations for the entire heap, or for a specific library or function.",
+            f"Before analysis, ensure '{SetChapFileName.cmd_template}' is called.",
+            f'To view error counts, use: "{self.cmd_name} q q q".',
+            sep="\n",
+        )
 
     def invoke(self, args, from_tty):
         global ALLOCATIONS
-        if ALLOCATIONS is None:
-            print("Call set_chap FILENAME")
-            return
-
         arg_list = gdb.string_to_argv(args)
+        if len(arg_list) == 1 and arg_list[0] == "-h":
+            return self.__print_help()
+
+        if ALLOCATIONS is None:
+            return print(
+                f"Error: Chap file not set. Use the '{SetChapFileName.cmd_template}' command to set the chap file."
+            )
         if len(arg_list) == 0:
             ALLOCATIONS.print_libs()
         elif len(arg_list) == 1:
@@ -435,65 +468,95 @@ class HeapDetailedTotal(gdb.Command):
             print(f"errors: {ALLOCATIONS.errors_count}, bytes:{ALLOCATIONS.errors_malloc_total}")
 
 
-class HeapWithAddreses(gdb.Command):
-    def __init__(self):
-        gdb.Command.__init__(self, "heap_addresses", gdb.COMMAND_DATA)
+class HeapWithAddreses(GdbCommandData):
+    def __print_help(self):
+        print(
+            f"Usage: {self.cmd_name} LIB_NAME FUNC_NAME",
+            "Displays the allocation addresses for a specific function in a library.",
+            f"Before analysis, ensure '{SetChapFileName.cmd_template}' is called.",
+            sep="\n",
+        )
 
     def invoke(self, args, from_tty):
         global ALLOCATIONS
+        arg_list = gdb.string_to_argv(args)
+        if len(arg_list) == 1 and arg_list[0] == "-h":
+            return self.__print_help()
+
         if ALLOCATIONS is None:
-            print("Call set_chap FILENAME")
+            print(
+                f"Error: Chap file not set. Use the '{SetChapFileName.cmd_template}' command to set the chap file."
+            )
             return
 
-        arg_list = gdb.string_to_argv(args)
         if len(arg_list) == 2:
             ALLOCATIONS.print_func(arg_list[0], arg_list[1], show_alloc_addreses=True)
         else:
-            print("args: lib_name func_name")
+            return self.__print_help()
 
 
-class HeapFree(gdb.Command):
-    def __init__(self):
-        gdb.Command.__init__(self, "heap_free", gdb.COMMAND_DATA)
+class HeapFree(GdbCommandData):
+    def __print_help(self):
+        print(
+            f"Usage: {self.cmd_name} [count, detailed]",
+            "Displays free allocations grouped by size. Two modes are available: ",
+            " - 'count' displays the number of allocations for each size;",
+            " - 'detailed' displays the individual addresses of each allocation.",
+            f"Before analysis, ensure '{SetChapFileName.cmd_template}' is called.",
+            sep="\n",
+        )
 
     def invoke(self, args, from_tty):
         global ALLOCATIONS
         arg_list = gdb.string_to_argv(args)
+        if (
+            len(arg_list) > 1
+            or len(arg_list) == 1
+            and (arg_list[0] == "-h" or arg_list[0] not in ["count", "detailed"])
+        ):
+            return self.__print_help()
+
         if ALLOCATIONS is None:
-            print("Call set_chap FILENAME")
-            return
+            return print(
+                f"Error: Chap file not set. Use the '{SetChapFileName.cmd_template}' command to set the chap file."
+            )
 
-        if len(arg_list) != 1 or arg_list[0] not in ["count", "detailed"]:
-            print("For more info enter arg: count, detailed")
-            ALLOCATIONS.print_free()
-            return
-        ALLOCATIONS.print_free(arg_list[0])
+        if len(arg_list) == 1:
+            return ALLOCATIONS.print_free(arg_list[0])
+        print(
+            "To view more detailed information about free allocations, "
+            "use the 'count' or 'detailed' option."
+        )
+        return ALLOCATIONS.print_free()
 
 
-class Hexdump(gdb.Command):
-    def __init__(self):
-        gdb.Command.__init__(self, "hexdump", gdb.COMMAND_DATA)
-
-    def __print_usage(self):
-        print("Usage: hexdump ADDRESS [-c] [LINES_OF_32BYTES. Default 1000]")
+class Hexdump(GdbCommandData):
+    def __print_help(self):
+        print(
+            f"Usage: {self.cmd_name} ADDRESS [-s] [LINES_OF_32BYTES. Default 1000]",
+            "Displays the hex and string representation of data starting from the specified address, "
+            "with each line representing 32 bytes of data.",
+            'The "-s" flag hides the hex representation and shows only the string representation.',
+            sep="\n",
+        )
 
     def invoke(self, args, from_tty):
         arg_list = gdb.string_to_argv(args)
 
-        if len(arg_list) < 1 or len(arg_list) > 3:
-            return self.__print_usage()
+        if len(arg_list) < 1 or len(arg_list) > 3 or len(arg_list) == 1 and arg_list[0] == "-h":
+            return self.__print_help()
         addr_arg = arg_list[0]
         addr = int(addr_arg, 16) if addr_arg.startswith("0x") else int(addr_arg)
         chars_only = False
         lines = 1000
         if len(arg_list) == 2:
-            if arg_list[1] != "-c":
+            if arg_list[1] != "-s":
                 lines = int(arg_list[1])
             else:
                 chars_only = True
         if len(arg_list) == 3:
-            if arg_list[1] != "-c":
-                return self.__print_usage()
+            if arg_list[1] != "-s":
+                return self.__print_help()
             chars_only = True
             lines = int(arg_list[2])
 
@@ -505,13 +568,57 @@ class Hexdump(gdb.Command):
             lines -= 1
 
 
-def register_commands():
-    SetChapFileName()
-    HeapDetailedTotal()
-    HeapWithAddreses()
-    HeapFree()
-    Hexdump()
+SetChapFileName.cmd_template = "set_chap FILENAME"
 
+
+def register_commands():
+    SetChapFileName("set_chap")
+    HeapTotal("heap_total")
+    HeapWithAddreses("heap_addrs")
+    HeapFree("heap_free")
+    Hexdump("hexdump")
+
+
+def print_script_description():
+    print(
+        "---Malloc Tracer Gdb Plugin---",
+        "Typical usage:",
+        "set_chap app.dump.1288407.list_allocations",
+        "  # Not needed if gdb is run with: -ex \"python chap_file='app.dump.1288407.list_allocations'\"",
+        "heap_total",
+        '> Lib: "/path/to/one_elf_file": Sizes: User=110.0MB, Mem=110.01MB, Chunk=110.01MB; Count=66; PerAllocMean=1747647.56b',
+        'heap_total "/path/to/one_elf_file"',
+        '> Func: "some_function(int)": Sizes: User=1.17KB, Mem=1.18KB, Chunk=2.13KB; Count=61; PerAllocMean=19.67b'
+        'heap_total "/path/to/one_elf_file" "some_function(int)',
+        'heap_addrs "/path/to/one_elf_file" "some_function(int)',
+        "> Data addrs: 0x55b65e3f3000, 0x55b65e3f3970" "hexdump 0x55b65e3f3000 5",
+        "Explanation of size metrics:",
+        " - User: The number of bytes requested by the user from malloc.",
+        " - Mem: The number of bytes actually allocated by malloc, excluding the two bytes used by the malloc tracer footer.",
+        " - Chunk: The number of bytes actually allocated by malloc, including the two bytes used by the malloc tracer footer.",
+        " - PerAllocMean: The average number of bytes per allocation, calculated as User/Count.",
+        "-" * 30,
+        sep="\n",
+    )
+
+
+"""
+To run the script, use the following command
+gdb ./hello_world ./app.dump.1288407 -ex \"python chap_file='app.dump.1288407.list_allocations'\" -x /full/path/to/malloc_tracer/gdb_plugin/gdb_malloc_tracer
+or
+gdb ./hello_world ./app.dump.1288407 -x /full/path/to/malloc_tracer/gdb_plugin/gdb_malloc_tracer
+"""
 
 ALLOCATIONS = None
 register_commands()
+print_script_description()
+
+try:
+    if chap_file:
+        if set_chap_file(Path(chap_file)):
+            print(f"Chap file is set: {chap_file}")
+except:
+    print(
+        "Chap file with allocations is not set. "
+        f"Before analysis, ensure '{SetChapFileName.cmd_template}' is called."
+    )
