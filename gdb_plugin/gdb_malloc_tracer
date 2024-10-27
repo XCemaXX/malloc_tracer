@@ -558,14 +558,14 @@ class HeapOne(GdbCommandData):
         return_addr, size_user = Allocations.parse_hook_malloc_footer(addr, malloc_size)
         if size_user < 0 or size_user >= malloc_size:
             print("Error: fail to parse allocation")
-            self.__add_error(malloc_size)
             return
 
         address_resolver = AddressResolver()
         lib, func_name, func_offset = address_resolver.get_info_symbol(return_addr)
         ms = MemorySizes(user_size=size_user, memsize=malloc_size - (2 * 8), chunksize=malloc_size, count=1)
         print(
-            f"Data address: {hex(addr)}" f"RetAddr: {hex(return_addr)}, {ms}",
+            f"Data address: {hex(addr)}",
+            f"RetAddr: {hex(return_addr)}, {ms}",
             f"Lib: {lib}",
             f"Func: {func_name}+{func_offset}",
             sep="\n",
