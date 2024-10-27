@@ -280,7 +280,7 @@ class Allocations:
             counter += 1
             if counter % 100000 == 0:
                 print(f"Analyzed {counter} records")
-            return_addr, size_user = self.__parse_hook_malloc_footer(chunk_addr, size_malloc)
+            return_addr, size_user = self.parse_hook_malloc_footer(chunk_addr, size_malloc)
             if size_user < 0 or size_user >= size_malloc:
                 self.__add_error(size_malloc)
                 continue
@@ -329,7 +329,7 @@ class Allocations:
                     yield (start, size)
 
     @staticmethod
-    def __parse_hook_malloc_footer(addr: int, size_malloc: int) -> Tuple[int, int]:
+    def parse_hook_malloc_footer(addr: int, size_malloc: int) -> Tuple[int, int]:
         try:
             addr = addr + size_malloc - 16
             return_addr, user_size = hexdump_as_two_uint64s(addr)
@@ -400,8 +400,13 @@ class Allocations:
             raise ValueError("Not supported mode")
 
 
-# TODO: update readme
-# TODO: get info about single allocation by addr
+def print_hex_dump(addr: int, lines: int, chars_only: bool = False) -> None:
+    size = 32
+    while lines > 0:
+        hd = hexdump_as_bytes(addr, size, chars_only=chars_only)
+        print(f"{fmt_addr(addr)} -> {fmt_addr(addr + size - 1)} {hd}")
+        addr += size
+        lines -= 1
 
 
 def set_chap_file(filename: Path) -> bool:
@@ -421,7 +426,7 @@ class GdbCommandData(gdb.Command):
 
 
 class SetChapFileName(GdbCommandData):
-    def __print_help(self):
+    def __print_help(self) -> None:
         print(
             f"Usage: {self.cmd_name} FILENAME",
             "Sets the source file containing allocation data for analysis.",
@@ -439,7 +444,7 @@ class SetChapFileName(GdbCommandData):
 
 
 class HeapTotal(GdbCommandData):
-    def __print_help(self):
+    def __print_help(self) -> None:
         print(
             f"Usage: {self.cmd_name} [LIB_NAME [FUNC_NAME]]",
             "Displays memory allocations for the entire heap, or for a specific library or function.",
@@ -469,7 +474,7 @@ class HeapTotal(GdbCommandData):
 
 
 class HeapWithAddreses(GdbCommandData):
-    def __print_help(self):
+    def __print_help(self) -> None:
         print(
             f"Usage: {self.cmd_name} LIB_NAME FUNC_NAME",
             "Displays the allocation addresses for a specific function in a library.",
@@ -496,7 +501,7 @@ class HeapWithAddreses(GdbCommandData):
 
 
 class HeapFree(GdbCommandData):
-    def __print_help(self):
+    def __print_help(self) -> None:
         print(
             f"Usage: {self.cmd_name} [count, detailed]",
             "Displays free allocations grouped by size. Two modes are available: ",
@@ -530,8 +535,59 @@ class HeapFree(GdbCommandData):
         return ALLOCATIONS.print_free()
 
 
+class HeapOne(GdbCommandData):
+    def __print_help(self) -> None:
+        print(
+            f"Usage: {self.cmd_name} ADDRESS [-s] [MAX_LINES_OF_32BYTES_TO_HEXDUMP]",
+            "Displays information about a specific allocation in the heap.",
+            "The information includes the return address, sizes metrics, library and function.",
+            "Additionally, a hex dump of the allocation is displayed.",
+            'The "-s" flag hides the hex representation and shows only the string representation.',
+            sep="\n",
+        )
+
+    def invoke(self, args, from_tty):
+        arg_list = gdb.string_to_argv(args)
+        if len(arg_list) < 1 or len(arg_list) > 3 or len(arg_list) == 1 and arg_list[0] == "-h":
+            return self.__print_help()
+
+        addr_arg = arg_list[0]
+        addr = int(addr_arg, 16) if addr_arg.startswith("0x") else int(addr_arg)
+        malloc_header = hexdump_as_uint64_t(addr - 8)
+        malloc_size = (malloc_header & ~0b11) - 8
+        return_addr, size_user = Allocations.parse_hook_malloc_footer(addr, malloc_size)
+        if size_user < 0 or size_user >= malloc_size:
+            print("Error: fail to parse allocation")
+            self.__add_error(malloc_size)
+            return
+
+        address_resolver = AddressResolver()
+        lib, func_name, func_offset = address_resolver.get_info_symbol(return_addr)
+        ms = MemorySizes(user_size=size_user, memsize=malloc_size - (2 * 8), chunksize=malloc_size, count=1)
+        print(
+            f"Data address: {hex(addr)}" f"RetAddr: {hex(return_addr)}, {ms}",
+            f"Lib: {lib}",
+            f"Func: {func_name}+{func_offset}",
+            sep="\n",
+        )
+        lines = malloc_size // 32 + (malloc_size % 32 != 0)
+        chars_only = False
+        if len(arg_list) == 2:
+            if arg_list[1] != "-s":
+                lines = min(int(arg_list[1]), lines)
+            else:
+                chars_only = True
+        if len(arg_list) == 3:
+            if arg_list[1] != "-s":
+                return self.__print_help()
+            chars_only = True
+            lines = min(int(arg_list[2]), lines)
+
+        print_hex_dump(addr, lines, chars_only)
+
+
 class Hexdump(GdbCommandData):
-    def __print_help(self):
+    def __print_help(self) -> None:
         print(
             f"Usage: {self.cmd_name} ADDRESS [-s] [LINES_OF_32BYTES. Default 1000]",
             "Displays the hex and string representation of data starting from the specified address, "
@@ -560,12 +616,7 @@ class Hexdump(GdbCommandData):
             chars_only = True
             lines = int(arg_list[2])
 
-        size = 32
-        while lines > 0:
-            hd = hexdump_as_bytes(addr, size, chars_only=chars_only)
-            print(f"{fmt_addr(addr)} -> {fmt_addr(addr + size - 1)} {hd}")
-            addr += size
-            lines -= 1
+        print_hex_dump(addr, lines, chars_only)
 
 
 SetChapFileName.cmd_template = "set_chap FILENAME"
@@ -576,6 +627,7 @@ def register_commands():
     HeapTotal("heap_total")
     HeapWithAddreses("heap_addrs")
     HeapFree("heap_free")
+    HeapOne("heap_one")
     Hexdump("hexdump")
 
 
@@ -591,7 +643,9 @@ def print_script_description():
         '> Func: "some_function(int)": Sizes: User=1.17KB, Mem=1.18KB, Chunk=2.13KB; Count=61; PerAllocMean=19.67b'
         'heap_total "/path/to/one_elf_file" "some_function(int)',
         'heap_addrs "/path/to/one_elf_file" "some_function(int)',
-        "> Data addrs: 0x55b65e3f3000, 0x55b65e3f3970" "hexdump 0x55b65e3f3000 5",
+        "> Data addrs: 0x55b65e3f3000, 0x55b65e3f3970",
+        "hexdump 0x55b65e3f3000 5",
+        "heap_one 0x55b65e3f3000",
         "Explanation of size metrics:",
         " - User: The number of bytes requested by the user from malloc.",
         " - Mem: The number of bytes actually allocated by malloc, excluding the two bytes used by the malloc tracer footer.",
